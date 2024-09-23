@@ -5,7 +5,7 @@ use std::{
     mem,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
-    process::exit,
+    process::{exit, ExitCode},
     time::Duration,
 };
 
@@ -24,6 +24,7 @@ use nix::{
     },
     unistd::{close, dup2, execv, fork, pipe2, setsid, ForkResult, Pid},
 };
+use tracing::{debug, error, info};
 
 const TOKEN_STDOUT: Token = Token(0);
 const TOKEN_STDERR: Token = Token(1);
@@ -46,16 +47,25 @@ struct Args {
     id: String,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
+    Ok(OpenOptions::new().create(true).write(true).open(path)?)
+}
 
+fn read_pipe(pipe: &OwnedFd, buf: &mut [u8]) -> Result<usize> {
+    let mut pipe_file = unsafe { File::from_raw_fd(pipe.as_raw_fd()) };
+    let bytes_read = pipe_file.read(buf)?;
+    mem::forget(pipe_file); // prevent closing file descriptor
+    Ok(bytes_read)
+}
+
+fn start(args: Args) -> Result<()> {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
-            println!("shim pid: {}", child);
+            info!("Shim PID: {}", child);
             exit(0);
         }
         Ok(ForkResult::Child) => (),
-        Err(err) => panic!("Failed to fork: {}", err),
+        Err(err) => bail!("Failed to fork: {}", err),
     }
 
     let dev_null = open("/dev/null", OFlag::O_RDWR, Mode::empty())?;
@@ -88,12 +98,12 @@ fn main() -> Result<()> {
             ];
 
             if let Err(err) = execv(&argv[0], &argv) {
-                panic!("Failed to exec runc: {}", err);
+                bail!("Failed to exec runc: {}", err);
             }
 
             unsafe { libc::_exit(127) }
         }
-        Err(err) => panic!("Failed to fork: {}", err),
+        Err(err) => bail!("Failed to fork: {}", err),
     };
 
     drop(pipe_out.1);
@@ -101,7 +111,7 @@ fn main() -> Result<()> {
 
     let runtime_status = match waitpid(pid, None) {
         Ok(WaitStatus::Exited(_, status)) => status,
-        _ => panic!("unexpected error"),
+        _ => bail!("Runtime exited with unknown status"),
     };
 
     if runtime_status != 0 {
@@ -173,31 +183,35 @@ fn main() -> Result<()> {
                 _ => {}
             }
         }
-        println!("Done polling");
+        debug!("Done polling");
     }
 
     match container_status.unwrap() {
         WaitStatus::Exited(pid, status) => {
-            println!("Container {} exited with status {}", pid, status);
+            info!("Container {} exited with status {}", pid, status);
         }
         WaitStatus::Signaled(pid, signal, _) => {
-            println!("Container {} exited with signal {}", pid, signal);
+            info!("Container {} exited with signal {}", pid, signal);
         }
         _ => {
-            println!("Container exited with unknown status");
+            info!("Container exited with unknown status");
         }
     };
 
     Ok(())
 }
 
-fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
-    Ok(OpenOptions::new().create(true).write(true).open(path)?)
-}
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .init();
 
-fn read_pipe(pipe: &OwnedFd, buf: &mut [u8]) -> Result<usize> {
-    let mut pipe_file = unsafe { File::from_raw_fd(pipe.as_raw_fd()) };
-    let bytes_read = pipe_file.read(buf)?;
-    mem::forget(pipe_file); // prevent closing file descriptor
-    Ok(bytes_read)
+    let args = Args::parse();
+    match start(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            error!("Failed to start shim: {}", err);
+            ExitCode::FAILURE
+        }
+    }
 }
