@@ -88,7 +88,6 @@ fn start(args: Args) -> Result<()> {
             dup2(pipe_out.1.as_raw_fd(), libc::STDOUT_FILENO).context("Failed to dup stdout")?;
             dup2(pipe_err.1.as_raw_fd(), libc::STDERR_FILENO).context("Failed to dup stderr")?;
             close(dev_null).context("Failed to close dev null")?;
-
             let argv = [
                 CString::new(args.runtime.to_string_lossy().to_string())?,
                 CString::new("create")?,
@@ -96,11 +95,9 @@ fn start(args: Args) -> Result<()> {
                 CString::new(args.bundle.to_string_lossy().to_string())?,
                 CString::new(args.id.as_str())?,
             ];
-
             if let Err(err) = execv(&argv[0], &argv) {
                 bail!("Failed to exec runc: {}", err);
             }
-
             unsafe { libc::_exit(127) }
         }
         Err(err) => bail!("Failed to fork: {}", err),
@@ -109,14 +106,12 @@ fn start(args: Args) -> Result<()> {
     drop(pipe_out.1);
     drop(pipe_err.1);
 
-    let runtime_status = match waitpid(pid, None) {
-        Ok(WaitStatus::Exited(_, status)) => status,
+    match waitpid(pid, None) {
+        Ok(WaitStatus::Exited(_, 0)) => {}
+        Ok(WaitStatus::Exited(_, status)) => bail!("Runtime exited with status {}", status),
+        Ok(WaitStatus::Signaled(_, signal, _)) => bail!("Runtime exited with signal {}", signal),
         _ => bail!("Runtime exited with unknown status"),
     };
-
-    if runtime_status != 0 {
-        bail!("Runtime exited with status {}", runtime_status);
-    }
 
     let signals = Signal::SIGCHLD | Signal::SIGINT | Signal::SIGTERM;
     sigprocmask(
@@ -210,7 +205,7 @@ fn main() -> ExitCode {
     match start(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            error!("Failed to start shim: {}", err);
+            error!("{:?}", err);
             ExitCode::FAILURE
         }
     }
