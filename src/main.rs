@@ -13,24 +13,29 @@ use nix::{
     libc,
     sys::{
         prctl::set_child_subreaper,
+        signal::{kill, Signal},
         stat::Mode,
-        wait::{waitpid, WaitStatus},
+        wait::{waitpid, WaitPidFlag, WaitStatus},
     },
     unistd::{close, dup2, execv, fork, pipe2, setsid, ForkResult, Pid},
 };
 use tokio::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     signal::unix::{signal, SignalKind},
     time::sleep,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+const PID_FILE: &str = "container.pid";
+const STDOUT_FILE: &str = "stdout.log";
+const STDERR_FILE: &str = "stderr.log";
 
 /// Shim process for running containers.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to runtime executable.
+    /// Path to OCI runtime executable.
     #[arg(short, long, default_value = "/usr/sbin/runc")]
     runtime: PathBuf,
 
@@ -45,7 +50,7 @@ struct Args {
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".into()))
         .init();
 
     let args = Args::parse();
@@ -93,6 +98,8 @@ fn start(args: Args) -> Result<()> {
                 CString::new("create")?,
                 CString::new("--bundle")?,
                 CString::new(args.bundle.to_string_lossy().to_string())?,
+                CString::new("--pid-file")?,
+                CString::new(args.bundle.join(PID_FILE).to_string_lossy().to_string())?,
                 CString::new(args.id.as_str())?,
             ];
             if let Err(err) = execv(&argv[0], &argv) {
@@ -113,26 +120,41 @@ fn start(args: Args) -> Result<()> {
         _ => bail!("Runtime exited with unknown status"),
     };
 
-    monitor(pipe_out.0, pipe_err.0)
+    monitor(args.bundle, pipe_out.0, pipe_err.0)
 }
 
 #[tokio::main]
-async fn monitor(stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
+async fn monitor(bundle: PathBuf, stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
+    let container_pid = read_pid(bundle.join(PID_FILE)).await?;
+
     let mut sigchld = signal(SignalKind::child())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigquit = signal(SignalKind::quit())?;
+
     let mut stdout = unsafe { File::from_raw_fd(stdout_fd.into_raw_fd()) };
     let mut stderr = unsafe { File::from_raw_fd(stderr_fd.into_raw_fd()) };
     let mut stdout_reader = BufReader::new(&mut stdout).lines();
     let mut stderr_reader = BufReader::new(&mut stderr).lines();
-    let mut stdout_writer = BufWriter::new(stdio_file("/tmp/stdout.log").await?);
-    let mut stderr_writer = BufWriter::new(stdio_file("/tmp/stderr.log").await?);
+    let mut stdout_writer = BufWriter::new(stdio_file(bundle.join(STDOUT_FILE)).await?);
+    let mut stderr_writer = BufWriter::new(stdio_file(bundle.join(STDERR_FILE)).await?);
 
     debug!("Monitoring container");
     let mut container_status = None;
     loop {
         tokio::select! {
             _ = sigchld.recv() => {
-                let status = waitpid(Pid::from_raw(-1), None).context("Failed to get container status")?;
+                let status = waitpid(container_pid, Some(WaitPidFlag::WNOHANG)).context("Failed to get container status")?;
                 container_status = Some(status);
+            }
+            _ = sigint.recv() => {
+                forward_signal(container_pid, Signal::SIGINT);
+            }
+            _ = sigterm.recv() => {
+                forward_signal(container_pid, Signal::SIGTERM);
+            }
+            _ = sigquit.recv() => {
+                forward_signal(container_pid, Signal::SIGQUIT);
             }
             Ok(Some(line)) = stdout_reader.next_line() => {
                 stdout_writer.write_all(line.as_bytes()).await?;
@@ -164,6 +186,26 @@ async fn monitor(stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
     };
 
     Ok(())
+}
+
+async fn read_pid<P: AsRef<Path>>(path: P) -> Result<Pid> {
+    let contents = fs::read_to_string(path).await?;
+    Ok(Pid::from_raw(contents.parse()?))
+}
+
+fn forward_signal(container_pid: Pid, signal: Signal) -> () {
+    match kill(container_pid, signal) {
+        Ok(()) => (),
+        Err(nix::Error::ESRCH) => {
+            warn!("Container {} not found, ignoring signal", container_pid);
+        }
+        Err(err) => {
+            error!(
+                "Failed to forward signal to container {}: {}",
+                container_pid, err
+            );
+        }
+    }
 }
 
 async fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
