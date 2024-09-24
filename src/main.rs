@@ -137,15 +137,15 @@ async fn monitor(stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
             Ok(Some(line)) = stdout_reader.next_line() => {
                 stdout_writer.write_all(line.as_bytes()).await?;
                 stdout_writer.write_u8(b'\n').await?;
+                stdout_writer.flush().await?;
             }
             Ok(Some(line)) = stderr_reader.next_line() => {
                 stderr_writer.write_all(line.as_bytes()).await?;
                 stderr_writer.write_u8(b'\n').await?;
+                stderr_writer.flush().await?;
             }
             // allow for a delay so that all stdio is handled before exiting
-            Some(_) = delayed_exit(container_status, Duration::from_millis(500)) => {
-                stdout_writer.flush().await?;
-                stderr_writer.flush().await?;
+            _ = sleep(Duration::from_millis(500)), if container_status.is_some() => {
                 break;
             }
         }
@@ -174,14 +174,4 @@ async fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
         .open(path)
         .await?;
     Ok(file)
-}
-
-async fn delayed_exit(status: Option<WaitStatus>, duration: Duration) -> Option<()> {
-    match status {
-        Some(_) => {
-            sleep(duration).await;
-            Some(())
-        }
-        None => None,
-    }
 }
