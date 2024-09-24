@@ -169,6 +169,7 @@ async fn monitor(stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
 async fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
     let file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(path)
         .await?;
@@ -177,7 +178,10 @@ async fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
 
 async fn delayed_exit(status: Option<WaitStatus>, duration: Duration) -> Option<()> {
     match status {
-        Some(_) => Some(sleep(duration).await),
+        Some(_) => {
+            sleep(duration).await;
+            Some(())
+        }
         None => None,
     }
 }
