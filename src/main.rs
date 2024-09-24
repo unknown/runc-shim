@@ -1,9 +1,6 @@
 use std::{
     ffi::CString,
-    fs::{File, OpenOptions},
-    io::{Read, Write},
-    mem,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::{Path, PathBuf},
     process::{exit, ExitCode},
     time::Duration,
@@ -11,24 +8,23 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use mio::{unix::SourceFd, Events, Interest, Poll, Token};
 use nix::{
     fcntl::{open, OFlag},
     libc,
     sys::{
         prctl::set_child_subreaper,
-        signal::{sigprocmask, Signal},
-        signalfd::SignalFd,
         stat::Mode,
         wait::{waitpid, WaitStatus},
     },
     unistd::{close, dup2, execv, fork, pipe2, setsid, ForkResult, Pid},
 };
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    signal::unix::{signal, SignalKind},
+    time::sleep,
+};
 use tracing::{debug, error, info};
-
-const TOKEN_STDOUT: Token = Token(0);
-const TOKEN_STDERR: Token = Token(1);
-const TOKEN_SIGNAL: Token = Token(2);
 
 /// Shim process for running containers.
 #[derive(Parser, Debug)]
@@ -47,15 +43,19 @@ struct Args {
     id: String,
 }
 
-fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
-    Ok(OpenOptions::new().create(true).write(true).open(path)?)
-}
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+        .init();
 
-fn read_pipe(pipe: &OwnedFd, buf: &mut [u8]) -> Result<usize> {
-    let mut pipe_file = unsafe { File::from_raw_fd(pipe.as_raw_fd()) };
-    let bytes_read = pipe_file.read(buf)?;
-    mem::forget(pipe_file); // prevent closing file descriptor
-    Ok(bytes_read)
+    let args = Args::parse();
+    match start(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            error!("{:?}", err);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn start(args: Args) -> Result<()> {
@@ -113,72 +113,42 @@ fn start(args: Args) -> Result<()> {
         _ => bail!("Runtime exited with unknown status"),
     };
 
-    let signals = Signal::SIGCHLD | Signal::SIGINT | Signal::SIGTERM;
-    sigprocmask(
-        nix::sys::signal::SigmaskHow::SIG_SETMASK,
-        Some(&signals),
-        None,
-    )
-    .context("Failed to set signal mask")?;
-    let signalfd = SignalFd::new(&signals)?;
+    monitor(pipe_out.0, pipe_err.0)
+}
 
-    let mut poll = Poll::new()?;
-    let mut events = Events::with_capacity(1024);
+#[tokio::main]
+async fn monitor(stdout_fd: OwnedFd, stderr_fd: OwnedFd) -> Result<()> {
+    let mut sigchld = signal(SignalKind::child())?;
+    let mut stdout = unsafe { File::from_raw_fd(stdout_fd.into_raw_fd()) };
+    let mut stderr = unsafe { File::from_raw_fd(stderr_fd.into_raw_fd()) };
+    let mut stdout_reader = BufReader::new(&mut stdout).lines();
+    let mut stderr_reader = BufReader::new(&mut stderr).lines();
+    let mut stdout_writer = BufWriter::new(stdio_file("/tmp/stdout.log").await?);
+    let mut stderr_writer = BufWriter::new(stdio_file("/tmp/stderr.log").await?);
 
-    poll.registry().register(
-        &mut SourceFd(&pipe_out.0.as_raw_fd()),
-        TOKEN_STDOUT,
-        Interest::READABLE,
-    )?;
-
-    poll.registry().register(
-        &mut SourceFd(&pipe_err.0.as_raw_fd()),
-        TOKEN_STDERR,
-        Interest::READABLE,
-    )?;
-
-    poll.registry().register(
-        &mut SourceFd(&signalfd.as_raw_fd()),
-        TOKEN_SIGNAL,
-        Interest::READABLE,
-    )?;
-
-    let mut stdout_file = stdio_file("/tmp/stdout.log").context("Failed to open stdout file")?;
-    let mut stderr_file = stdio_file("/tmp/stderr.log").context("Failed to open stderr file")?;
+    debug!("Monitoring container");
     let mut container_status = None;
-    while container_status.is_none() {
-        let mut buf = [0; 1024];
-        poll.poll(&mut events, Some(Duration::from_millis(5000)))?;
-        for event in &events {
-            match event.token() {
-                TOKEN_STDOUT if event.is_readable() => {
-                    let bytes_read = read_pipe(&pipe_out.0, &mut buf)?;
-                    stdout_file.write_all(&buf[..bytes_read])?;
-                }
-                TOKEN_STDERR if event.is_readable() => {
-                    let bytes_read = read_pipe(&pipe_err.0, &mut buf)?;
-                    stderr_file.write_all(&buf[..bytes_read])?;
-                }
-                TOKEN_SIGNAL => {
-                    let signal = match signalfd.read_signal() {
-                        Ok(Some(siginfo)) => Signal::try_from(siginfo.ssi_signo as i32),
-                        Ok(None) => bail!("Failed to read signal"),
-                        Err(err) => bail!(err),
-                    }?;
-                    match signal {
-                        Signal::SIGCHLD => {
-                            let status = waitpid(Pid::from_raw(-1), None)?;
-                            container_status = Some(status);
-                        }
-                        _signal => {
-                            // TODO: forward signal to container
-                        }
-                    }
-                }
-                _ => {}
+    loop {
+        tokio::select! {
+            _ = sigchld.recv() => {
+                let status = waitpid(Pid::from_raw(-1), None).context("Failed to get container status")?;
+                container_status = Some(status);
+            }
+            Ok(Some(line)) = stdout_reader.next_line() => {
+                stdout_writer.write_all(line.as_bytes()).await?;
+                stdout_writer.write_u8(b'\n').await?;
+            }
+            Ok(Some(line)) = stderr_reader.next_line() => {
+                stderr_writer.write_all(line.as_bytes()).await?;
+                stderr_writer.write_u8(b'\n').await?;
+            }
+            // allow for a delay so that all stdio is handled before exiting
+            Some(_) = delayed_exit(container_status, Duration::from_millis(500)) => {
+                stdout_writer.flush().await?;
+                stderr_writer.flush().await?;
+                break;
             }
         }
-        debug!("Done polling");
     }
 
     match container_status.unwrap() {
@@ -196,17 +166,18 @@ fn start(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
-        .init();
+async fn stdio_file<P: AsRef<Path>>(path: P) -> Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path)
+        .await?;
+    Ok(file)
+}
 
-    let args = Args::parse();
-    match start(args) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            error!("{:?}", err);
-            ExitCode::FAILURE
-        }
+async fn delayed_exit(status: Option<WaitStatus>, duration: Duration) -> Option<()> {
+    match status {
+        Some(_) => Some(sleep(duration).await),
+        None => None,
     }
 }
