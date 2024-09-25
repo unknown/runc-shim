@@ -67,17 +67,15 @@ fn start(args: Args) -> Result<()> {
     setsid().context("Failed to setsid")?;
     set_child_subreaper(true).context("Failed to set subreaper")?;
 
-    let mut container = Container::new(&args.id, &args.bundle);
-    container
-        .start(&args.runtime)
-        .context("Failed to start container")?;
-
-    monitor_container(container).context("Failed to monitor container")?;
-
-    Ok(())
+    start_container(args).context("Failed to start container")
 }
 
 #[tokio::main]
-async fn monitor_container(container: Container) -> Result<()> {
+async fn start_container(args: Args) -> Result<()> {
+    let mut container = Container::new(&args.id, &args.bundle);
+    container
+        .start(&args.runtime)
+        .await
+        .context("Failed to start container")?;
     container.monitor().await
 }
