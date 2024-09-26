@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use nix::{
     sys::{
@@ -6,13 +8,19 @@ use nix::{
     },
     unistd::Pid,
 };
-use tokio::signal::unix::{signal, SignalKind};
-use tracing::{debug, error, info, warn};
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::{mpsc, Mutex},
+};
+use tracing::{error, info, warn};
 
 use super::Container;
 
 impl Container {
-    pub async fn monitor(&self) -> Result<()> {
+    pub async fn handle_signals(
+        &self,
+        wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    ) -> Result<()> {
         let container_pid = self.pid.context("Missing container PID")?;
 
         let mut sigchld = signal(SignalKind::child())?;
@@ -20,13 +28,24 @@ impl Container {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigquit = signal(SignalKind::quit())?;
 
-        debug!("Monitoring container");
-        let container_status;
         loop {
             tokio::select! {
                 _ = sigchld.recv() => {
                     let status = waitpid(container_pid, Some(WaitPidFlag::WNOHANG)).context("Failed to get container status")?;
-                    container_status = Some(status);
+                    match status {
+                        WaitStatus::Exited(pid, status) => {
+                            info!("Container {} exited with status {}", pid, status);
+                        }
+                        WaitStatus::Signaled(pid, signal, _) => {
+                            info!("Container {} exited with signal {}", pid, signal);
+                        }
+                        _ => {
+                            info!("Container exited with unknown status");
+                        }
+                    }
+                    for sender in wait_channels.lock().await.iter() {
+                        sender.send(()).context("Failed to send exit signal")?;
+                    }
                     break;
                 }
                 _ = sigint.recv() => {
@@ -40,18 +59,6 @@ impl Container {
                 }
             }
         }
-
-        match container_status.unwrap() {
-            WaitStatus::Exited(pid, status) => {
-                info!("Container {} exited with status {}", pid, status);
-            }
-            WaitStatus::Signaled(pid, signal, _) => {
-                info!("Container {} exited with signal {}", pid, signal);
-            }
-            _ => {
-                info!("Container exited with unknown status");
-            }
-        };
 
         Ok(())
     }

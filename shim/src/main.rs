@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf,
     process::{exit, ExitCode},
+    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +13,7 @@ use nix::{
     sys::{prctl::set_child_subreaper, stat::Mode},
     unistd::{close, dup2, fork, setsid, ForkResult},
 };
+use tokio::sync::{mpsc, Mutex};
 use tracing::error;
 
 mod container;
@@ -72,10 +74,20 @@ fn start(args: Args) -> Result<()> {
 
 #[tokio::main]
 async fn start_container(args: Args) -> Result<()> {
+    let wait_channels = Arc::new(Mutex::new(Vec::new()));
     let mut container = Container::new(&args.id, &args.bundle);
     container
         .start(&args.runtime)
         .await
         .context("Failed to start container")?;
-    container.monitor().await
+
+    let wait_channels_clone = wait_channels.clone();
+    tokio::spawn(async move { container.handle_signals(wait_channels_clone).await });
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    wait_channels.lock().await.push(tx);
+
+    rx.recv().await.context("Failed to receive exit signal")?;
+
+    Ok(())
 }

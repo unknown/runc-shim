@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use nix::unistd::Pid;
 use tokio::process::Command;
 
-mod monitor;
+mod signal;
 
 const PID_FILE: &str = "container.pid";
 const STDOUT_FILE: &str = "stdout.log";
