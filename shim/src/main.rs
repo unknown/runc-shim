@@ -1,22 +1,25 @@
 use std::{
+    net::SocketAddr,
     path::PathBuf,
     process::{exit, ExitCode},
-    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use container::Container;
 use nix::{
     fcntl::{open, OFlag},
     libc,
     sys::{prctl::set_child_subreaper, stat::Mode},
     unistd::{close, dup2, fork, setsid, ForkResult},
 };
-use tokio::sync::{mpsc, Mutex};
+use service::TaskService;
+use shim_protos::proto::task_server::TaskServer;
+use tonic::transport::Server;
 use tracing::error;
 
 mod container;
+mod service;
+mod signal;
 
 /// Shim process for running containers.
 #[derive(Parser, Debug)]
@@ -25,14 +28,6 @@ struct Args {
     /// Path to OCI runtime executable.
     #[arg(short, long, default_value = "/usr/sbin/runc")]
     runtime: PathBuf,
-
-    /// Path to the bundle directory.
-    #[arg(short, long)]
-    bundle: PathBuf,
-
-    /// Name of the container.
-    #[arg(long)]
-    id: String,
 }
 
 fn main() -> ExitCode {
@@ -51,9 +46,11 @@ fn main() -> ExitCode {
 }
 
 fn start(args: Args) -> Result<()> {
+    let addr = "[::1]:50051".parse().unwrap();
+
     match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => {
-            println!("Shim PID: {}", child);
+        Ok(ForkResult::Parent { .. }) => {
+            println!("{}", addr);
             exit(0);
         }
         Ok(ForkResult::Child) => (),
@@ -69,25 +66,16 @@ fn start(args: Args) -> Result<()> {
     setsid().context("Failed to setsid")?;
     set_child_subreaper(true).context("Failed to set subreaper")?;
 
-    start_container(args).context("Failed to start container")
+    start_service(args, addr).context("Failed to start container")?;
+    Ok(())
 }
 
 #[tokio::main]
-async fn start_container(args: Args) -> Result<()> {
-    let wait_channels = Arc::new(Mutex::new(Vec::new()));
-    let mut container = Container::new(&args.id, &args.bundle);
-    container
-        .start(&args.runtime)
-        .await
-        .context("Failed to start container")?;
-
-    let wait_channels_clone = wait_channels.clone();
-    tokio::spawn(async move { container.handle_signals(wait_channels_clone).await });
-
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    wait_channels.lock().await.push(tx);
-
-    rx.recv().await.context("Failed to receive exit signal")?;
-
+async fn start_service(args: Args, addr: SocketAddr) -> Result<()> {
+    let task_service = TaskService::new(args.runtime);
+    Server::builder()
+        .add_service(TaskServer::new(task_service))
+        .serve(addr)
+        .await?;
     Ok(())
 }

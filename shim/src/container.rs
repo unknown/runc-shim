@@ -8,8 +8,6 @@ use anyhow::{bail, Context, Result};
 use nix::unistd::Pid;
 use tokio::process::Command;
 
-mod signal;
-
 const PID_FILE: &str = "container.pid";
 const STDOUT_FILE: &str = "stdout.log";
 const STDERR_FILE: &str = "stderr.log";
@@ -56,6 +54,25 @@ impl Container {
         let pid = read_pid(self.bundle.join(PID_FILE))?;
         self.pid = Some(pid);
         Ok(())
+    }
+
+    pub async fn delete(&mut self, runtime: &PathBuf) -> Result<()> {
+        let mut cmd = Command::new(runtime);
+        cmd.arg("delete").arg(&self.id);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().context("Failed to spawn OCI runtime")?;
+        match child.wait().await {
+            Ok(status) if status.success() => {}
+            Ok(status) => bail!("OCI runtime exited with status {}", status),
+            Err(err) => bail!("Failed to wait for OCI runtime: {}", err),
+        };
+        Ok(())
+    }
+
+    pub fn pid(&self) -> Option<Pid> {
+        self.pid
     }
 }
 
