@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package shim.task;
+
+service Task {
+    rpc Create(CreateTaskRequest) returns (CreateTaskResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+    rpc Wait(WaitRequest) returns (WaitResponse);
+}
+
+message CreateTaskRequest {
+    string id = 1;
+    string bundle = 2;
+}
+
+message CreateTaskResponse {
+    uint32 pid = 1;
+}
+
+message DeleteRequest {
+    string id = 1;
+}
+
+message DeleteResponse {
+    uint32 pid = 1;
+}
+
+message WaitRequest {
+    string id = 1;
+}
+
+message WaitResponse {
+    uint32 exit_status = 1;
+}
