@@ -1,27 +1,30 @@
 use std::{path::PathBuf, sync::Arc};
 
+use nix::sys::signal::{kill, Signal};
 use shim_protos::proto::{
     task_server::Task, CreateTaskRequest, CreateTaskResponse, DeleteRequest, DeleteResponse,
-    WaitRequest, WaitResponse,
+    ShutdownRequest, WaitRequest, WaitResponse,
 };
 use tokio::sync::{mpsc, Mutex};
 use tonic::{Request, Response, Status};
-use tracing::debug;
+use tracing::{debug, error};
 
-use crate::{container::Container, signal::handle_signals};
+use crate::{container::Container, signal::handle_signals, utils::ExitSignal};
 
 pub struct TaskService {
     runtime: PathBuf,
     container: Arc<Mutex<Option<Container>>>,
     wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    exit_signal: Arc<ExitSignal>,
 }
 
 impl TaskService {
-    pub fn new(runtime: PathBuf) -> Self {
+    pub fn new(runtime: PathBuf, exit_signal: Arc<ExitSignal>) -> Self {
         Self {
             runtime,
             container: Arc::new(Mutex::new(None)),
             wait_channels: Arc::new(Mutex::new(Vec::new())),
+            exit_signal,
         }
     }
 }
@@ -79,6 +82,9 @@ impl Task for TaskService {
 
     async fn wait(&self, _request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
         debug!("Waiting for container");
+        if self.container.lock().await.is_none() {
+            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
+        }
         let mut wait_channels = self.wait_channels.lock().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         wait_channels.push(tx);
@@ -88,5 +94,21 @@ impl Task for TaskService {
             None => return Err(Status::new(tonic::Code::Aborted, "Container exited")),
         };
         Ok(Response::new(WaitResponse { exit_status }))
+    }
+
+    async fn shutdown(&self, _request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
+        debug!("Shutting down container");
+        let container_guard = self.container.lock().await;
+        if container_guard.is_none() {
+            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
+        }
+        // Kill the container so that all `TaskService::wait` calls will return.
+        // This way, Tonic will respect the shutdown signal.
+        let pid = container_guard.as_ref().unwrap().pid().unwrap();
+        if let Err(err) = kill(pid, Signal::SIGTERM) {
+            error!("Failed to send SIGTERM to container: {}", err);
+        }
+        self.exit_signal.signal();
+        Ok(Response::new(()))
     }
 }

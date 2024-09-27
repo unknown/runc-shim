@@ -2,10 +2,13 @@ syntax = "proto3";
 
 package shim.task;
 
+import "google/protobuf/empty.proto";
+
 service Task {
     rpc Create(CreateTaskRequest) returns (CreateTaskResponse);
     rpc Delete(DeleteRequest) returns (DeleteResponse);
     rpc Wait(WaitRequest) returns (WaitResponse);
+    rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
 }
 
 message CreateTaskRequest {
@@ -31,4 +34,8 @@ message WaitRequest {
 
 message WaitResponse {
     uint32 exit_status = 1;
+}
+
+message ShutdownRequest {
+    string id = 1;
 }

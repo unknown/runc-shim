@@ -2,6 +2,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::{exit, ExitCode},
+    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
@@ -16,10 +17,12 @@ use service::TaskService;
 use shim_protos::proto::task_server::TaskServer;
 use tonic::transport::Server;
 use tracing::error;
+use utils::ExitSignal;
 
 mod container;
 mod service;
 mod signal;
+mod utils;
 
 /// Shim process for running containers.
 #[derive(Parser, Debug)]
@@ -72,10 +75,11 @@ fn start(args: Args) -> Result<()> {
 
 #[tokio::main]
 async fn start_service(args: Args, addr: SocketAddr) -> Result<()> {
-    let task_service = TaskService::new(args.runtime);
+    let shutdown_signal = Arc::new(ExitSignal::default());
+    let task_service = TaskService::new(args.runtime, shutdown_signal.clone());
     Server::builder()
         .add_service(TaskServer::new(task_service))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown_signal.wait())
         .await?;
     Ok(())
 }
