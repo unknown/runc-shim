@@ -86,6 +86,10 @@ impl Container {
         Ok(())
     }
 
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     pub fn pid(&self) -> Option<Pid> {
         self.pid
     }

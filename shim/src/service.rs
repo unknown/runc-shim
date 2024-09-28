@@ -61,11 +61,12 @@ impl Task for TaskService {
 
     async fn start(
         &self,
-        _request: Request<StartRequest>,
+        request: Request<StartRequest>,
     ) -> Result<Response<StartResponse>, Status> {
         debug!("Starting container");
+        let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let container = container_guard.as_mut().unwrap();
@@ -82,11 +83,12 @@ impl Task for TaskService {
 
     async fn delete(
         &self,
-        _request: Request<DeleteRequest>,
+        request: Request<DeleteRequest>,
     ) -> Result<Response<DeleteResponse>, Status> {
         debug!("Deleting container");
+        let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let container = container_guard.as_mut().unwrap();
@@ -101,11 +103,14 @@ impl Task for TaskService {
         Ok(Response::new(DeleteResponse { pid: raw_pid }))
     }
 
-    async fn wait(&self, _request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
+    async fn wait(&self, request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
         debug!("Waiting for container");
-        if self.container.lock().await.is_none() {
+        let request = request.into_inner();
+        let container_guard = self.container.lock().await;
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
+        drop(container_guard);
         let mut wait_channels = self.wait_channels.lock().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         wait_channels.push(tx);
@@ -117,15 +122,16 @@ impl Task for TaskService {
         Ok(Response::new(WaitResponse { exit_status }))
     }
 
-    async fn shutdown(&self, _request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
+    async fn shutdown(&self, request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
         debug!("Shutting down container");
+        let request = request.into_inner();
         let container_guard = self.container.lock().await;
-        if container_guard.is_none() {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
+        let pid = container_guard.as_ref().unwrap().pid().unwrap();
         // Kill the container so that all `TaskService::wait` calls will return.
         // This way, Tonic will respect the shutdown signal.
-        let pid = container_guard.as_ref().unwrap().pid().unwrap();
         if let Err(err) = kill(pid, Signal::SIGTERM) {
             error!("Failed to send SIGTERM to container: {}", err);
         }
