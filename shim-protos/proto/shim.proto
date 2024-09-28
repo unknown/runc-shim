@@ -6,6 +6,7 @@ import "google/protobuf/empty.proto";
 
 service Task {
     rpc Create(CreateTaskRequest) returns (CreateTaskResponse);
+    rpc Start(StartRequest) returns (StartResponse);
     rpc Delete(DeleteRequest) returns (DeleteResponse);
     rpc Wait(WaitRequest) returns (WaitResponse);
     rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
@@ -17,6 +18,14 @@ message CreateTaskRequest {
 }
 
 message CreateTaskResponse {
+    uint32 pid = 1;
+}
+
+message StartRequest {
+    string id = 1;
+}
+
+message StartResponse {
     uint32 pid = 1;
 }
 

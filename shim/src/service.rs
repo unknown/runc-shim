@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use nix::sys::signal::{kill, Signal};
 use shim_protos::proto::{
     task_server::Task, CreateTaskRequest, CreateTaskResponse, DeleteRequest, DeleteResponse,
-    ShutdownRequest, WaitRequest, WaitResponse,
+    ShutdownRequest, StartRequest, StartResponse, WaitRequest, WaitResponse,
 };
 use tokio::sync::{mpsc, Mutex};
 use tonic::{Request, Response, Status};
@@ -45,7 +45,7 @@ impl Task for TaskService {
         }
         let request = request.into_inner();
         let mut container = Container::new(&request.id, &request.bundle.into());
-        if let Err(err) = container.start(&self.runtime).await {
+        if let Err(err) = container.create(&self.runtime).await {
             return Err(Status::new(
                 tonic::Code::Internal,
                 format!("Failed to start container: {}", err),
@@ -57,6 +57,27 @@ impl Task for TaskService {
         let wait_channels_clone = self.wait_channels.clone();
         tokio::spawn(async move { handle_signals(pid, wait_channels_clone).await });
         Ok(Response::new(CreateTaskResponse { pid: raw_pid }))
+    }
+
+    async fn start(
+        &self,
+        _request: Request<StartRequest>,
+    ) -> Result<Response<StartResponse>, Status> {
+        debug!("Starting container");
+        let mut container_guard = self.container.lock().await;
+        if container_guard.is_none() {
+            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
+        }
+        let container = container_guard.as_mut().unwrap();
+        if let Err(err) = container.start(&self.runtime).await {
+            return Err(Status::new(
+                tonic::Code::Internal,
+                format!("Failed to start container: {}", err),
+            ));
+        }
+        let pid = container.pid().unwrap();
+        let raw_pid = pid.as_raw() as u32;
+        Ok(Response::new(StartResponse { pid: raw_pid }))
     }
 
     async fn delete(

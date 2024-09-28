@@ -32,7 +32,7 @@ impl Container {
         }
     }
 
-    pub async fn start(&mut self, runtime: &PathBuf) -> Result<()> {
+    pub async fn create(&mut self, runtime: &PathBuf) -> Result<()> {
         let mut cmd = Command::new(runtime);
         cmd.arg("create")
             .arg("--bundle")
@@ -53,6 +53,21 @@ impl Container {
         };
         let pid = read_pid(self.bundle.join(PID_FILE))?;
         self.pid = Some(pid);
+        Ok(())
+    }
+
+    pub async fn start(&mut self, runtime: &PathBuf) -> Result<()> {
+        let mut cmd = Command::new(runtime);
+        cmd.arg("start").arg(&self.id);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().context("Failed to spawn OCI runtime")?;
+        match child.wait().await {
+            Ok(status) if status.success() => {}
+            Ok(status) => bail!("OCI runtime exited with status {}", status),
+            Err(err) => bail!("Failed to wait for OCI runtime: {}", err),
+        };
         Ok(())
     }
 
