@@ -993,6 +993,7 @@ dependencies = [
  "nix",
  "shim-protos",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
