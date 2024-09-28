@@ -66,7 +66,7 @@ impl Task for TaskService {
         debug!("Starting container");
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let container = container_guard.as_mut().unwrap();
@@ -88,7 +88,7 @@ impl Task for TaskService {
         debug!("Deleting container");
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let container = container_guard.as_mut().unwrap();
@@ -107,7 +107,7 @@ impl Task for TaskService {
         debug!("Waiting for container");
         let request = request.into_inner();
         let container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         drop(container_guard);
@@ -126,7 +126,7 @@ impl Task for TaskService {
         debug!("Shutting down container");
         let request = request.into_inner();
         let container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != &request.id {
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let pid = container_guard.as_ref().unwrap().pid().unwrap();
