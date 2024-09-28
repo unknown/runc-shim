@@ -44,11 +44,24 @@ impl Task for TaskService {
             ));
         }
         let request = request.into_inner();
-        let mut container = Container::new(&request.id, &request.bundle.into());
+        let mut container = match Container::new(
+            &request.id,
+            &request.bundle.into(),
+            &request.stdout.into(),
+            &request.stderr.into(),
+        ) {
+            Ok(container) => container,
+            Err(err) => {
+                return Err(Status::new(
+                    tonic::Code::Internal,
+                    format!("Failed to initialize container: {}", err),
+                ))
+            }
+        };
         if let Err(err) = container.create(&self.runtime).await {
             return Err(Status::new(
                 tonic::Code::Internal,
-                format!("Failed to start container: {}", err),
+                format!("Failed to create container: {}", err),
             ));
         }
         let pid = container.pid().unwrap();

@@ -15,6 +15,11 @@ service Task {
 message CreateTaskRequest {
     string id = 1;
     string bundle = 2;
+    // these fields are used to represent rootfs, terminal, and stdin in
+    // containerd's message definition
+    reserved 3 to 5;
+    string stdout = 6;
+    string stderr = 7;
 }
 
 message CreateTaskResponse {

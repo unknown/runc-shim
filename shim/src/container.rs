@@ -9,8 +9,6 @@ use nix::unistd::Pid;
 use tokio::process::Command;
 
 const PID_FILE: &str = "container.pid";
-const STDOUT_FILE: &str = "stdout.log";
-const STDERR_FILE: &str = "stderr.log";
 
 pub struct Container {
     /// The container ID.
@@ -19,17 +17,25 @@ pub struct Container {
     /// The bundle directory.
     bundle: PathBuf,
 
+    /// The container's stdout file.
+    stdout: File,
+
+    /// The container's stderr file.
+    stderr: File,
+
     /// The container process ID.
     pid: Option<Pid>,
 }
 
 impl Container {
-    pub fn new(id: &str, bundle: &PathBuf) -> Self {
-        Self {
+    pub fn new(id: &str, bundle: &PathBuf, stdout: &PathBuf, stderr: &PathBuf) -> Result<Self> {
+        Ok(Self {
             id: id.to_string(),
-            bundle: bundle.to_path_buf(),
+            bundle: bundle.to_owned(),
+            stdout: stdio_file(stdout)?,
+            stderr: stdio_file(stderr)?,
             pid: None,
-        }
+        })
     }
 
     pub async fn create(&mut self, runtime: &PathBuf) -> Result<()> {
@@ -40,11 +46,9 @@ impl Container {
             .arg("--pid-file")
             .arg(self.bundle.join(PID_FILE))
             .arg(&self.id);
-        let stdout_file = stdio_file(self.bundle.join(STDOUT_FILE))?;
-        let stderr_file = stdio_file(self.bundle.join(STDERR_FILE))?;
         cmd.stdin(Stdio::null())
-            .stdout(stdout_file)
-            .stderr(stderr_file);
+            .stdout(self.stdout.try_clone()?)
+            .stderr(self.stderr.try_clone()?);
         let mut child = cmd.spawn().context("Failed to spawn OCI runtime")?;
         match child.wait().await {
             Ok(status) if status.success() => {}
