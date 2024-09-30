@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 pub async fn handle_signals(
     container_pid: Pid,
-    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<i32>>>>,
 ) -> Result<()> {
     let mut sigchld = signal(SignalKind::child())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -28,21 +28,26 @@ pub async fn handle_signals(
             _ = sigchld.recv() => {
                 debug!("Received SIGCHLD");
                 let status = waitpid(container_pid, Some(WaitPidFlag::WNOHANG)).context("Failed to get container status")?;
-                match status {
+                let exit_code = match status {
                     WaitStatus::Exited(pid, status) => {
                         info!("Container {} exited with status {}", pid, status);
+                        Some(status)
                     }
                     WaitStatus::Signaled(pid, signal, _) => {
                         info!("Container {} exited with signal {}", pid, signal);
+                        Some(128 + signal as i32)
                     }
                     _ => {
                         info!("Container exited with unknown status");
+                        None
                     }
-                }
+                };
+                if let Some(exit_code) = exit_code {
                 for sender in wait_channels.lock().await.iter() {
-                    if let Err(err) = sender.send(()) {
+                    if let Err(err) = sender.send(exit_code) {
                         error!("Failed to send exit signal: {}", err);
                     }
+                }
                 }
                 break;
             }

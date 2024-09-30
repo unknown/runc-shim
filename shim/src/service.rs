@@ -14,7 +14,7 @@ use crate::{container::Container, signal::handle_signals, utils::ExitSignal};
 pub struct TaskService {
     runtime: PathBuf,
     container: Arc<Mutex<Option<Container>>>,
-    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<i32>>>>,
     exit_signal: Arc<ExitSignal>,
 }
 
@@ -129,10 +129,12 @@ impl Task for TaskService {
         wait_channels.push(tx);
         drop(wait_channels);
         let exit_status = match rx.recv().await {
-            Some(()) => 0, // TODO: Get exit status from container
+            Some(exit_status) => exit_status,
             None => return Err(Status::new(tonic::Code::Aborted, "Container exited")),
         };
-        Ok(Response::new(WaitResponse { exit_status }))
+        Ok(Response::new(WaitResponse {
+            exit_status: exit_status as u32,
+        }))
     }
 
     async fn shutdown(&self, request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
