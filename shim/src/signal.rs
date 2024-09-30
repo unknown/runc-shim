@@ -69,7 +69,7 @@ pub async fn handle_signals(
     Ok(())
 }
 
-fn forward_signal(container_pid: Pid, signal: Signal) {
+pub fn forward_signal(container_pid: Pid, signal: Signal) {
     match kill(container_pid, signal) {
         Ok(()) => (),
         Err(nix::Error::ESRCH) => {

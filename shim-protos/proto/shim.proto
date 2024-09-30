@@ -9,6 +9,7 @@ service Task {
     rpc Start(StartRequest) returns (StartResponse);
     rpc Delete(DeleteRequest) returns (DeleteResponse);
     rpc Wait(WaitRequest) returns (WaitResponse);
+    rpc Kill(KillRequest) returns (google.protobuf.Empty);
     rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
 }
 
@@ -48,6 +49,13 @@ message WaitRequest {
 
 message WaitResponse {
     uint32 exit_status = 1;
+}
+
+message KillRequest {
+    string id = 1;
+    // this field is used to represent the exec_id in containerd's message definition
+    reserved 2;
+    uint32 signal = 3;
 }
 
 message ShutdownRequest {

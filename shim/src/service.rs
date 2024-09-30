@@ -1,15 +1,19 @@
 use std::{path::PathBuf, sync::Arc};
 
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::Signal;
 use shim_protos::proto::{
     task_server::Task, CreateTaskRequest, CreateTaskResponse, DeleteRequest, DeleteResponse,
-    ShutdownRequest, StartRequest, StartResponse, WaitRequest, WaitResponse,
+    KillRequest, ShutdownRequest, StartRequest, StartResponse, WaitRequest, WaitResponse,
 };
 use tokio::sync::{mpsc, Mutex};
 use tonic::{Request, Response, Status};
-use tracing::{debug, error};
+use tracing::debug;
 
-use crate::{container::Container, signal::handle_signals, utils::ExitSignal};
+use crate::{
+    container::Container,
+    signal::{forward_signal, handle_signals},
+    utils::ExitSignal,
+};
 
 pub struct TaskService {
     runtime: PathBuf,
@@ -137,6 +141,27 @@ impl Task for TaskService {
         }))
     }
 
+    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
+        debug!("Killing container");
+        let request = request.into_inner();
+        let container_guard = self.container.lock().await;
+        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
+            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
+        }
+        let pid = container_guard.as_ref().unwrap().pid().unwrap();
+        let signal = match Signal::try_from(request.signal as i32) {
+            Ok(signal) => signal,
+            Err(err) => {
+                return Err(Status::new(
+                    tonic::Code::InvalidArgument,
+                    format!("Invalid signal: {}", err),
+                ))
+            }
+        };
+        forward_signal(pid, signal);
+        Ok(Response::new(()))
+    }
+
     async fn shutdown(&self, request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
         debug!("Shutting down container");
         let request = request.into_inner();
@@ -147,9 +172,7 @@ impl Task for TaskService {
         let pid = container_guard.as_ref().unwrap().pid().unwrap();
         // Kill the container so that all `TaskService::wait` calls will return.
         // This way, Tonic will respect the shutdown signal.
-        if let Err(err) = kill(pid, Signal::SIGTERM) {
-            error!("Failed to send SIGTERM to container: {}", err);
-        }
+        forward_signal(pid, Signal::SIGTERM);
         self.exit_signal.signal();
         Ok(Response::new(()))
     }
