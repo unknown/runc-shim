@@ -165,14 +165,22 @@ impl Task for TaskService {
     async fn shutdown(&self, request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
         debug!("Shutting down container");
         let request = request.into_inner();
-        let container_guard = self.container.lock().await;
+        let mut container_guard = self.container.lock().await;
         if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
             return Err(Status::new(tonic::Code::NotFound, "Container not found"));
         }
         let pid = container_guard.as_ref().unwrap().pid().unwrap();
         // Kill the container so that all `TaskService::wait` calls will return.
-        // This way, Tonic will respect the shutdown signal.
+        // This way, Tonic can shutdown immediately.
         forward_signal(pid, Signal::SIGTERM);
+        let container = container_guard.as_mut().unwrap();
+        if let Err(err) = container.delete(&self.runtime).await {
+            return Err(Status::new(
+                tonic::Code::Internal,
+                format!("Failed to delete container: {}", err),
+            ));
+        }
+        *container_guard = None;
         self.exit_signal.signal();
         Ok(Response::new(()))
     }

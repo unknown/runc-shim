@@ -43,11 +43,11 @@ pub async fn handle_signals(
                     }
                 };
                 if let Some(exit_code) = exit_code {
-                for sender in wait_channels.lock().await.iter() {
-                    if let Err(err) = sender.send(exit_code) {
-                        error!("Failed to send exit signal: {}", err);
+                    for sender in wait_channels.lock().await.iter() {
+                        if let Err(err) = sender.send(exit_code) {
+                            error!("Failed to send exit signal: {}", err);
+                        }
                     }
-                }
                 }
                 break;
             }
