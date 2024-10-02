@@ -17,6 +17,7 @@ use command_fds::{CommandFdExt, FdMapping};
 use nix::{sys::prctl::set_child_subreaper, unistd::setsid};
 use service::TaskService;
 use shim_protos::proto::task_server::TaskServer;
+use tokio::fs;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tracing::error;
@@ -44,13 +45,19 @@ struct Args {
 
     /// Command to run.
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Start a task.
     Start,
+
+    /// Start daemon process (internal use only).
+    Daemon {
+        /// Path to the socket file.
+        socket_path: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -60,9 +67,11 @@ fn main() -> ExitCode {
 
     let args = Args::parse();
     let result = match args.command {
-        Some(Command::Start) => start(args),
-        // when the shim is started as a daemon, the command is not specified
-        None => start_daemon(args),
+        Command::Start => start(args),
+        Command::Daemon { ref socket_path } => {
+            let socket_path = socket_path.clone();
+            start_daemon(args, socket_path)
+        }
     };
 
     match result {
@@ -98,7 +107,9 @@ fn start(args: Args) -> Result<()> {
         .arg("--runtime")
         .arg(args.runtime)
         .arg("--id")
-        .arg(args.id);
+        .arg(args.id)
+        .arg("daemon")
+        .arg(socket_path);
     command
         .fd_mappings(vec![FdMapping {
             parent_fd: uds.into(),
@@ -110,7 +121,7 @@ fn start(args: Args) -> Result<()> {
 }
 
 #[tokio::main]
-async fn start_daemon(args: Args) -> Result<()> {
+async fn start_daemon(args: Args, socket_path: PathBuf) -> Result<()> {
     setsid().context("Failed to setsid")?;
     set_child_subreaper(true).context("Failed to set subreaper")?;
 
@@ -127,7 +138,9 @@ async fn start_daemon(args: Args) -> Result<()> {
         .serve_with_incoming_shutdown(uds_stream, shutdown_signal.wait())
         .await?;
 
-    // TODO: delete socket
+    fs::remove_file(socket_path)
+        .await
+        .context("Failed to remove socket")?;
 
     Ok(())
 }
