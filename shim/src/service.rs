@@ -83,10 +83,12 @@ impl Task for TaskService {
         debug!("Starting container");
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
-            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
-        }
-        let container = container_guard.as_mut().unwrap();
+        let container = match container_guard.as_mut() {
+            Some(container) if container.id() == request.id => container,
+            Some(_) | None => {
+                return Err(Status::new(tonic::Code::NotFound, "Container not found"))
+            }
+        };
         if let Err(err) = container.start(&self.runtime).await {
             return Err(Status::new(
                 tonic::Code::Internal,
@@ -105,10 +107,12 @@ impl Task for TaskService {
         debug!("Deleting container");
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
-            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
-        }
-        let container = container_guard.as_mut().unwrap();
+        let container = match container_guard.as_mut() {
+            Some(container) if container.id() == request.id => container,
+            Some(_) | None => {
+                return Err(Status::new(tonic::Code::NotFound, "Container not found"))
+            }
+        };
         if let Err(err) = container.delete(&self.runtime).await {
             return Err(Status::new(
                 tonic::Code::Internal,
@@ -123,11 +127,12 @@ impl Task for TaskService {
     async fn wait(&self, request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
         debug!("Waiting for container");
         let request = request.into_inner();
-        let container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
-            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
-        }
-        drop(container_guard);
+        match self.container.lock().await.as_ref() {
+            Some(container) if container.id() == request.id => {}
+            Some(_) | None => {
+                return Err(Status::new(tonic::Code::NotFound, "Container not found"))
+            }
+        };
         let mut wait_channels = self.wait_channels.lock().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         wait_channels.push(tx);
@@ -145,10 +150,13 @@ impl Task for TaskService {
         debug!("Killing container");
         let request = request.into_inner();
         let container_guard = self.container.lock().await;
-        if container_guard.is_none() || container_guard.as_ref().unwrap().id() != request.id {
-            return Err(Status::new(tonic::Code::NotFound, "Container not found"));
-        }
-        let pid = container_guard.as_ref().unwrap().pid().unwrap();
+        let container = match container_guard.as_ref() {
+            Some(container) if container.id() == request.id => container,
+            Some(_) | None => {
+                return Err(Status::new(tonic::Code::NotFound, "Container not found"))
+            }
+        };
+        let pid = container.pid().unwrap();
         let signal = match Signal::try_from(request.signal as i32) {
             Ok(signal) => signal,
             Err(err) => {
