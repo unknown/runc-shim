@@ -5,21 +5,19 @@ use shim_protos::proto::{
     task_server::Task, CreateTaskRequest, CreateTaskResponse, DeleteRequest, DeleteResponse,
     KillRequest, ShutdownRequest, StartRequest, StartResponse, WaitRequest, WaitResponse,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::{
-    container::Container,
-    signal::{forward_signal, handle_signals},
+    container::{Container, Status as ContainerStatus},
     utils::ExitSignal,
 };
 
 pub struct TaskService {
-    runtime: PathBuf,
-    container: Arc<Mutex<Option<Container>>>,
-    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<i32>>>>,
-    exit_signal: Arc<ExitSignal>,
+    pub runtime: PathBuf,
+    pub container: Arc<Mutex<Option<Container>>>,
+    pub exit_signal: Arc<ExitSignal>,
 }
 
 impl TaskService {
@@ -27,7 +25,6 @@ impl TaskService {
         Self {
             runtime,
             container: Arc::new(Mutex::new(None)),
-            wait_channels: Arc::new(Mutex::new(Vec::new())),
             exit_signal,
         }
     }
@@ -48,32 +45,21 @@ impl Task for TaskService {
             ));
         }
         let request = request.into_inner();
-        let mut container = match Container::new(
+        let mut container = Container::new(
             &request.id,
             &request.bundle.into(),
             &request.stdout.into(),
             &request.stderr.into(),
-        ) {
-            Ok(container) => container,
-            Err(err) => {
-                return Err(Status::new(
-                    tonic::Code::Internal,
-                    format!("Failed to initialize container: {}", err),
-                ))
-            }
-        };
+        );
         if let Err(err) = container.create(&self.runtime).await {
             return Err(Status::new(
                 tonic::Code::Internal,
                 format!("Failed to create container: {}", err),
             ));
         }
-        let pid = container.pid().unwrap();
-        let raw_pid = pid.as_raw() as u32;
+        let pid = container.pid as u32;
         *container_guard = Some(container);
-        let wait_channels_clone = self.wait_channels.clone();
-        tokio::spawn(async move { handle_signals(pid, wait_channels_clone).await });
-        Ok(Response::new(CreateTaskResponse { pid: raw_pid }))
+        Ok(Response::new(CreateTaskResponse { pid }))
     }
 
     async fn start(
@@ -84,7 +70,7 @@ impl Task for TaskService {
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
         let container = match container_guard.as_mut() {
-            Some(container) if container.id() == request.id => container,
+            Some(container) if container.id == request.id => container,
             Some(_) | None => {
                 return Err(Status::new(tonic::Code::NotFound, "Container not found"))
             }
@@ -95,9 +81,8 @@ impl Task for TaskService {
                 format!("Failed to start container: {}", err),
             ));
         }
-        let pid = container.pid().unwrap();
-        let raw_pid = pid.as_raw() as u32;
-        Ok(Response::new(StartResponse { pid: raw_pid }))
+        let pid = container.pid as u32;
+        Ok(Response::new(StartResponse { pid }))
     }
 
     async fn delete(
@@ -108,7 +93,7 @@ impl Task for TaskService {
         let request = request.into_inner();
         let mut container_guard = self.container.lock().await;
         let container = match container_guard.as_mut() {
-            Some(container) if container.id() == request.id => container,
+            Some(container) if container.id == request.id => container,
             Some(_) | None => {
                 return Err(Status::new(tonic::Code::NotFound, "Container not found"))
             }
@@ -119,44 +104,60 @@ impl Task for TaskService {
                 format!("Failed to delete container: {}", err),
             ));
         }
-        let raw_pid = container.pid().unwrap().as_raw() as u32;
+        let pid = container.pid as u32;
         *container_guard = None;
-        Ok(Response::new(DeleteResponse { pid: raw_pid }))
+        Ok(Response::new(DeleteResponse { pid }))
     }
 
     async fn wait(&self, request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
         debug!("Waiting for container");
         let request = request.into_inner();
-        match self.container.lock().await.as_ref() {
-            Some(container) if container.id() == request.id => {}
+        let mut container_guard = self.container.lock().await;
+        let container = match container_guard.as_mut() {
+            Some(container) if container.id == request.id => container,
             Some(_) | None => {
                 return Err(Status::new(tonic::Code::NotFound, "Container not found"))
             }
         };
-        let mut wait_channels = self.wait_channels.lock().await;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        wait_channels.push(tx);
-        drop(wait_channels);
-        let exit_status = match rx.recv().await {
-            Some(exit_status) => exit_status,
-            None => return Err(Status::new(tonic::Code::Aborted, "Container exited")),
+        let status = container.status.clone();
+        if status != ContainerStatus::RUNNING && status != ContainerStatus::CREATED {
+            return Ok(Response::new(WaitResponse {
+                exit_status: container.exit_code as u32,
+            }));
+        }
+        let mut rx = container.wait_channel();
+        drop(container_guard);
+        if rx.recv().await.is_none() {
+            return Err(Status::new(
+                tonic::Code::Aborted,
+                "Container exited unexpectedly",
+            ));
+        }
+        let mut container_guard = self.container.lock().await;
+        let container = match container_guard.as_mut() {
+            Some(container) if container.id == request.id => container,
+            Some(_) | None => {
+                return Err(Status::new(
+                    tonic::Code::NotFound,
+                    "Container no longer exists",
+                ))
+            }
         };
         Ok(Response::new(WaitResponse {
-            exit_status: exit_status as u32,
+            exit_status: container.exit_code as u32,
         }))
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
         debug!("Killing container");
         let request = request.into_inner();
-        let container_guard = self.container.lock().await;
-        let container = match container_guard.as_ref() {
-            Some(container) if container.id() == request.id => container,
+        let mut container_guard = self.container.lock().await;
+        let container = match container_guard.as_mut() {
+            Some(container) if container.id == request.id => container,
             Some(_) | None => {
                 return Err(Status::new(tonic::Code::NotFound, "Container not found"))
             }
         };
-        let pid = container.pid().unwrap();
         let signal = match Signal::try_from(request.signal as i32) {
             Ok(signal) => signal,
             Err(err) => {
@@ -166,7 +167,12 @@ impl Task for TaskService {
                 ))
             }
         };
-        forward_signal(pid, signal);
+        if let Err(err) = container.kill(signal).await {
+            return Err(Status::new(
+                tonic::Code::Internal,
+                format!("Failed to kill container: {}", err),
+            ));
+        }
         Ok(Response::new(()))
     }
 
@@ -174,10 +180,14 @@ impl Task for TaskService {
         debug!("Shutting down container");
         let mut container_guard = self.container.lock().await;
         if let Some(container) = container_guard.as_mut() {
-            let pid = container.pid().unwrap();
             // Kill the container so that all `TaskService::wait` calls will return.
             // This way, Tonic can shutdown immediately.
-            forward_signal(pid, Signal::SIGTERM);
+            if let Err(err) = container.kill(Signal::SIGTERM).await {
+                return Err(Status::new(
+                    tonic::Code::Internal,
+                    format!("Failed to kill container: {}", err),
+                ));
+            }
             if let Err(err) = container.delete(&self.runtime).await {
                 return Err(Status::new(
                     tonic::Code::Internal,

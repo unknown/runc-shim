@@ -17,7 +17,8 @@ use command_fds::{CommandFdExt, FdMapping};
 use nix::{sys::prctl::set_child_subreaper, unistd::setsid};
 use service::TaskService;
 use shim_protos::proto::task_server::TaskServer;
-use tokio::fs;
+use signal::handle_signals;
+use tokio::{fs, sync::mpsc};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 use tracing::error;
@@ -127,6 +128,20 @@ async fn start_daemon(args: Args, socket_path: PathBuf) -> Result<()> {
 
     let shutdown_signal = Arc::new(ExitSignal::default());
     let task_service = TaskService::new(args.runtime, shutdown_signal.clone());
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let container = task_service.container.clone();
+    tokio::spawn(async move { handle_signals(tx).await });
+    tokio::spawn(async move {
+        loop {
+            if let Some(exit_code) = rx.recv().await {
+                let mut container_guard = container.lock().await;
+                if let Some(container) = container_guard.as_mut() {
+                    container.set_exited(exit_code);
+                }
+            }
+        }
+    });
 
     let std_uds = unsafe { UnixListener::from_raw_fd(SOCKET_FD) };
     std_uds.set_nonblocking(true)?;

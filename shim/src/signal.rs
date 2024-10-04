@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
 use nix::{
     sys::{
         signal::{kill, Signal},
@@ -10,76 +8,65 @@ use nix::{
 };
 use tokio::{
     signal::unix::{signal, SignalKind},
-    sync::{mpsc, Mutex},
+    sync::mpsc,
 };
 use tracing::{debug, error, info, warn};
 
-pub async fn handle_signals(
-    container_pid: Pid,
-    wait_channels: Arc<Mutex<Vec<mpsc::UnboundedSender<i32>>>>,
-) -> Result<()> {
+pub async fn handle_signals(sender: mpsc::UnboundedSender<i32>) -> Result<()> {
     let mut sigchld = signal(SignalKind::child())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigquit = signal(SignalKind::quit())?;
 
     loop {
         tokio::select! {
             _ = sigchld.recv() => {
                 debug!("Received SIGCHLD");
-                let status = waitpid(container_pid, Some(WaitPidFlag::WNOHANG)).context("Failed to get container status")?;
-                let exit_code = match status {
-                    WaitStatus::Exited(pid, status) => {
-                        info!("Container {} exited with status {}", pid, status);
-                        Some(status)
-                    }
-                    WaitStatus::Signaled(pid, signal, _) => {
-                        info!("Container {} exited with signal {}", pid, signal);
-                        Some(128 + signal as i32)
-                    }
-                    _ => {
-                        info!("Container exited with unknown status");
-                        None
-                    }
-                };
-                if let Some(exit_code) = exit_code {
-                    for sender in wait_channels.lock().await.iter() {
-                        if let Err(err) = sender.send(exit_code) {
-                            error!("Failed to send exit signal: {}", err);
+                // Because container PIDs are not known a priori, we call `waitpid` with a PID of -1.
+                // However, not all SIGCHLD signals are from container processes (e.g. a
+                // `process::Command` to create a container) so we need to handle all signals.
+                loop {
+                    match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::Exited(pid, status)) => {
+                            info!("Process {} exited with status {}", pid, status);
+                            if let Err(err) = sender.send(status) {
+                                error!("Failed to send exit status: {}", err);
+                            }
                         }
-                    }
+                        Ok(WaitStatus::Signaled(pid, signal, _)) => {
+                            info!("Process {} exited with signal {}", pid, signal);
+                            if let Err(err) = sender.send(128 + signal as i32) {
+                                error!("Failed to send exit status: {}", err);
+                            }
+                        }
+                        Ok(WaitStatus::StillAlive) => {
+                            // Still some unterminated child process
+                            break;
+                        }
+                        Ok(_) => {
+                            // Unknown status
+                        }
+                        Err(nix::Error::ECHILD) => {
+                            // No child processes
+                            break;
+                        }
+                        Err(err) => {
+                            warn!("Error occurred in signal handler: {}", err);
+                            break;
+                        }
+                    };
                 }
-                break;
-            }
-            _ = sigint.recv() => {
-                debug!("Received SIGINT");
-                forward_signal(container_pid, Signal::SIGINT);
-            }
-            _ = sigterm.recv() => {
-                debug!("Received SIGTERM");
-                forward_signal(container_pid, Signal::SIGTERM);
-            }
-            _ = sigquit.recv() => {
-                debug!("Received SIGQUIT");
-                forward_signal(container_pid, Signal::SIGQUIT);
             }
         }
     }
-
-    Ok(())
 }
 
-pub fn forward_signal(container_pid: Pid, signal: Signal) {
-    match kill(container_pid, signal) {
-        Ok(()) => (),
+pub fn forward_signal(pid: Pid, signal: Signal) -> Result<()> {
+    match kill(pid, signal) {
+        Ok(()) => Ok(()),
         Err(nix::Error::ESRCH) => {
-            warn!("Container {} not found, ignoring signal", container_pid);
+            warn!("Process {} not found, ignoring signal", pid);
+            Ok(())
         }
         Err(err) => {
-            error!(
-                "Failed to forward signal to container {}: {}",
-                container_pid, err
-            );
+            bail!("Failed to forward signal to process {}: {}", pid, err);
         }
     }
 }
