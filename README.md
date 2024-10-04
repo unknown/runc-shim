@@ -1,15 +1,18 @@
 # runc-shim
 
-Shim process to interact with an OCI runtime. The design is loosely based on [containerd's shim](https://github.com/containerd/containerd/blob/main/core/runtime/v2/README.md).
+A shim to interact with an OCI runtime that is loosely based on the containerd shim. Read about containerd shim's design and the purpose of a shim [here](https://github.com/containerd/containerd/blob/main/core/runtime/v2/README.md).
 
-## Building
+## Usage
+
+Build the shim by running:
 
 ```bash
 cargo build --release
 ```
 
-## Running
+Running the shim will print to stdout a socket path that can be used to interact with the shim process via gRPC. For example to start a task with ID `hello`:
 
 ```bash
-sudo ./target/release/shim --runtime /usr/sbin/runc
+sudo ./target/release/shim --runtime /usr/sbin/runc --id hello start
+# unix:///run/shim/16156531084128653017.sock
 ```
