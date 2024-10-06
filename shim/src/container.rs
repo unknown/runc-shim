@@ -6,6 +6,8 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use nix::{sys::signal::Signal, unistd::Pid};
+use prost_types::Timestamp;
+use time::OffsetDateTime;
 use tokio::{process::Command, sync::mpsc};
 
 use crate::signal::forward_signal;
@@ -34,6 +36,9 @@ pub struct Container {
     /// The container's exit code.
     pub exit_code: i32,
 
+    /// The container's exit timestamp.
+    exited_at: Option<OffsetDateTime>,
+
     /// The container's wait channels.
     wait_channels: Vec<mpsc::UnboundedSender<()>>,
 }
@@ -56,6 +61,7 @@ impl Container {
             status: Status::UNKNOWN,
             pid: 0,
             exit_code: 0,
+            exited_at: None,
             wait_channels: Vec::new(),
         }
     }
@@ -131,9 +137,17 @@ impl Container {
     pub fn set_exited(&mut self, exit_code: i32) {
         self.status = Status::STOPPED;
         self.exit_code = exit_code;
+        self.exited_at = Some(OffsetDateTime::now_utc());
         for tx in self.wait_channels.drain(..) {
             let _ = tx.send(());
         }
+    }
+
+    pub fn exited_at(&self) -> Option<Timestamp> {
+        self.exited_at.map(|exited_at| Timestamp {
+            seconds: exited_at.unix_timestamp(),
+            nanos: exited_at.nanosecond() as i32,
+        })
     }
 }
 

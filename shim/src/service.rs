@@ -123,6 +123,7 @@ impl Task for TaskService {
         if status != ContainerStatus::RUNNING && status != ContainerStatus::CREATED {
             return Ok(Response::new(WaitResponse {
                 exit_status: container.exit_code as u32,
+                exited_at: container.exited_at(),
             }));
         }
         let mut rx = container.wait_channel();
@@ -145,6 +146,7 @@ impl Task for TaskService {
         };
         Ok(Response::new(WaitResponse {
             exit_status: container.exit_code as u32,
+            exited_at: container.exited_at(),
         }))
     }
 
@@ -180,8 +182,7 @@ impl Task for TaskService {
         debug!("Shutting down container");
         let mut container_guard = self.container.lock().await;
         if let Some(container) = container_guard.as_mut() {
-            // Kill the container so that all `TaskService::wait` calls will return.
-            // This way, Tonic can shutdown immediately.
+            // Kill the container so that all `TaskService::wait` calls return and Tonic can shutdown.
             if let Err(err) = container.kill(Signal::SIGTERM).await {
                 return Err(Status::new(
                     tonic::Code::Internal,
