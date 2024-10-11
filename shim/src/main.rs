@@ -135,9 +135,9 @@ async fn start_daemon(args: Args, socket_path: PathBuf) -> Result<()> {
     tokio::spawn(async move {
         loop {
             if let Some(exit_code) = rx.recv().await {
-                let mut container_guard = container.lock().await;
-                if let Some(container) = container_guard.as_mut() {
-                    container.set_exited(exit_code);
+                let container_guard = container.read().await;
+                if let Some(container) = container_guard.as_ref() {
+                    container.set_exited(exit_code).await;
                 }
             }
         }
