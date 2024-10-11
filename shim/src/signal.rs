@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use nix::{
+    libc::pid_t,
     sys::{
         signal::{kill, Signal},
         wait::{waitpid, WaitPidFlag, WaitStatus},
@@ -12,7 +13,7 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-pub async fn handle_signals(sender: mpsc::UnboundedSender<i32>) -> Result<()> {
+pub async fn handle_signals(sender: mpsc::UnboundedSender<(pid_t, i32)>) -> Result<()> {
     let mut sigchld = signal(SignalKind::child())?;
 
     loop {
@@ -26,13 +27,13 @@ pub async fn handle_signals(sender: mpsc::UnboundedSender<i32>) -> Result<()> {
                     match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                         Ok(WaitStatus::Exited(pid, status)) => {
                             info!("Process {} exited with status {}", pid, status);
-                            if let Err(err) = sender.send(status) {
+                            if let Err(err) = sender.send((pid.as_raw(), status)) {
                                 error!("Failed to send exit status: {}", err);
                             }
                         }
                         Ok(WaitStatus::Signaled(pid, signal, _)) => {
                             info!("Process {} exited with signal {}", pid, signal);
-                            if let Err(err) = sender.send(128 + signal as i32) {
+                            if let Err(err) = sender.send((pid.as_raw(), 128 + signal as i32)) {
                                 error!("Failed to send exit status: {}", err);
                             }
                         }

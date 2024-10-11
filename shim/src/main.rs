@@ -130,14 +130,15 @@ async fn start_daemon(args: Args, socket_path: PathBuf) -> Result<()> {
     let task_service = TaskService::new(args.runtime, shutdown_signal.clone());
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let container = task_service.container.clone();
+    let containers = task_service.containers.clone();
     tokio::spawn(async move { handle_signals(tx).await });
     tokio::spawn(async move {
         loop {
-            if let Some(exit_code) = rx.recv().await {
-                let container_guard = container.read().await;
-                if let Some(container) = container_guard.as_ref() {
-                    container.set_exited(exit_code).await;
+            if let Some((pid, exit_code)) = rx.recv().await {
+                for container in containers.iter() {
+                    if container.pid().await == pid {
+                        container.set_exited(exit_code).await;
+                    }
                 }
             }
         }
