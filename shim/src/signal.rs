@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{bail, Result};
 use nix::{
     libc::pid_t,
@@ -10,6 +12,7 @@ use nix::{
 use tokio::{
     signal::unix::{signal, SignalKind},
     sync::mpsc,
+    time::sleep,
 };
 use tracing::{debug, error, info, warn};
 
@@ -22,7 +25,10 @@ pub async fn handle_signals(sender: mpsc::UnboundedSender<(pid_t, i32)>) -> Resu
                 debug!("Received SIGCHLD");
                 // Because container PIDs are not known a priori, we call `waitpid` with a PID of -1.
                 // However, not all SIGCHLD signals are from container processes (e.g. a
-                // `process::Command` to create a container) so we need to handle all signals.
+                // `process::Command` to create a container).
+                //
+                // TODO: Sleeping is a hack awit to avoid prematurely reaping commands
+                sleep(Duration::from_millis(10)).await;
                 loop {
                     match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                         Ok(WaitStatus::Exited(pid, status)) => {

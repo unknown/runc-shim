@@ -21,7 +21,7 @@ use signal::handle_signals;
 use tokio::{fs, sync::mpsc};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
-use tracing::error;
+use tracing::{error, warn};
 use utils::ExitSignal;
 
 mod container;
@@ -135,10 +135,16 @@ async fn start_daemon(args: Args, socket_path: PathBuf) -> Result<()> {
     tokio::spawn(async move {
         loop {
             if let Some((pid, exit_code)) = rx.recv().await {
+                let mut found = false;
                 for container in containers.iter() {
                     if container.pid().await == pid {
                         container.set_exited(exit_code).await;
+                        found = true;
+                        break;
                     }
+                }
+                if !found {
+                    warn!("Received exit code for unknown pid {}", pid);
                 }
             }
         }
